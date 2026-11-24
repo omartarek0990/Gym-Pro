@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { User, Phone, QrCode, Calendar, Clock, Banknote, CalendarDays, Users, Activity, Gift, Snowflake, Camera, Trash2, RotateCcw, X, CheckCircle, XCircle, AlertTriangle, UserRound, ClipboardList, BadgeCheck, IdCard, UserPlus, Image } from 'lucide-react'
+import { User, Phone, QrCode, Calendar, Clock, Banknote, CalendarDays, Users, Activity, Gift, Snowflake, Camera, Trash2, RotateCcw, X, CheckCircle, XCircle, AlertTriangle, UserRound, ClipboardList, BadgeCheck, IdCard, UserPlus, Image, ArrowUpCircle } from 'lucide-react'
 import { open as shellOpen } from '@tauri-apps/plugin-shell'
 import { invoke } from '@/lib/tauri'
 import { Button } from '@/components/ui/button'
@@ -8,12 +8,12 @@ import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
-import { formatDate, formatTime, formatNumber, formatCurrency, getDaysLeft, getDaysColor, getStatusColor, generateId, getLocalDateString, addMonthsToDate, getPlanDurationDays, formatPhone } from '@/lib/utils'
+import { formatDate, formatTime, formatNumber, formatCurrency, getDaysLeft, getDaysColor, getStatusColor, generateId, getLocalDateString, addMonthsToDate, getPlanDurationDays, getDaysBetween, formatPhone } from '@/lib/utils'
 import { toast } from '@/hooks/useToast'
+import { compressImageData } from '@/lib/image'
 import { useLanguage } from '@/lib/i18n'
 import { useAuth } from '@/contexts/AuthContext'
 import FrozenCountdown from '@/components/cards/FrozenCountdown'
-import { refreshNotifications, bumpNotifications } from '@/hooks/useNotificationRefresh'
 import type { Member, Plan, Attendance, Renewal } from '@/types'
 
 interface Props {
@@ -54,9 +54,16 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
   const [editCardValidation, setEditCardValidation] = useState<{ status: string; message?: string }>({ status: '' })
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false)
+  const [payDialogOpen, setPayDialogOpen] = useState(false)
+  const [payAmount, setPayAmount] = useState(0)
   const [inviteForm, setInviteForm] = useState({ guest_name: '', guest_phone: '' })
   const [renewDialogOpen, setRenewDialogOpen] = useState(false)
   const [renewForm, setRenewForm] = useState({ plan_id: '' })
+  const [dateDialogOpen, setDateDialogOpen] = useState(false)
+  const [dateForm, setDateForm] = useState({ start_date: '' })
+  const [upgradeDialogOpen, setUpgradeDialogOpen] = useState(false)
+  const [upgradeForm, setUpgradeForm] = useState({ plan_id: '' })
+  const [upgradeMode, setUpgradeMode] = useState<'diff' | 'prorated'>('diff')
   const [confirmDialog, setConfirmDialog] = useState<{ open: boolean; title: string; message: string; onConfirm: () => void }>({ open: false, title: '', message: '', onConfirm: () => {} })
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -98,6 +105,67 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
     onRefresh()
   }
 
+  const getCurrentPlanPrice = (m: Member) => m.plan_price || plans.find((p) => p.id === m.plan_id)?.price || 0
+
+  const recordPayment = async () => {
+    if (!member || !payAmount) return
+    await invoke('record_payment', { id: generateId(), member_id: member.id, amount: payAmount, date: getLocalDateString(), member_name: member.name })
+    toast({ title: isArabic ? 'تم تسديد الدفعة' : 'Payment Recorded', variant: 'success' })
+    setPayDialogOpen(false)
+    onRefresh()
+  }
+
+  const handleEditDate = async () => {
+    if (!member || !dateForm.start_date) return
+    const newEnd = addMonthsToDate(dateForm.start_date, member.plan_duration_months || 1)
+    await invoke('update_member_dates', { member_id: member.id, new_start: dateForm.start_date, new_end: newEnd })
+    toast({ title: isArabic ? 'تم تحديث تاريخ البداية' : 'Start date updated', variant: 'success' })
+    setDateDialogOpen(false)
+    onRefresh()
+  }
+
+  const handleUpgrade = async () => {
+    if (!member || !upgradeForm.plan_id) return
+    const newPlan = plans.find((p) => p.id === upgradeForm.plan_id)
+    if (!newPlan || !upgradeNewEnd) return
+    try {
+      await invoke('upgrade_member_plan', {
+        id: generateId(),
+        member_id: member.id,
+        new_plan_id: newPlan.id,
+        new_end: upgradeNewEnd,
+        amount_paid: upgradeAmount,
+        date: getLocalDateString(),
+        member_name: member.name,
+        old_plan_name: getPlanName(member),
+      })
+      toast({ title: t('members.upgradeSuccess'), variant: 'success' })
+      setUpgradeDialogOpen(false)
+      setUpgradeForm({ plan_id: '' })
+      onRefresh()
+    } catch (err) {
+      toast({ title: String(err), variant: 'destructive' })
+    }
+  }
+
+  const upgradePlans = member ? plans.filter((p) => p.id !== member.plan_id) : []
+  const selectedUpgradePlan = plans.find((p) => p.id === upgradeForm.plan_id)
+  const todayStr = getLocalDateString()
+  const upgradeCurrentPrice = member ? getCurrentPlanPrice(member) : 0
+  const upgradeAmountDiff = member && selectedUpgradePlan ? Math.max(0, selectedUpgradePlan.price - upgradeCurrentPrice) : 0
+  const upgradeNewEndDiff = member && selectedUpgradePlan && member.start_date
+    ? addMonthsToDate(member.start_date, selectedUpgradePlan.duration_months)
+    : ''
+  const upgradeTotalDays = member && member.start_date && member.end_date ? getDaysBetween(member.start_date, member.end_date) : 0
+  const upgradeRemainingDays = member ? Math.max(0, getDaysBetween(todayStr, member.end_date)) : 0
+  const upgradeCredit = member && upgradeTotalDays > 0 ? upgradeCurrentPrice * (upgradeRemainingDays / upgradeTotalDays) : 0
+  const upgradeAmountProrated = member && selectedUpgradePlan ? Math.max(0, selectedUpgradePlan.price - upgradeCredit) : 0
+  const upgradeNewEndProrated = member && selectedUpgradePlan
+    ? addMonthsToDate(todayStr, selectedUpgradePlan.duration_months)
+    : ''
+  const upgradeAmount = upgradeMode === 'prorated' ? upgradeAmountProrated : upgradeAmountDiff
+  const upgradeNewEnd = upgradeMode === 'prorated' ? upgradeNewEndProrated : upgradeNewEndDiff
+
   const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || !member) return
@@ -109,8 +177,9 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
     const reader = new FileReader()
     reader.onload = async () => {
       const base64Data = reader.result as string
+      const photo = await compressImageData(base64Data).catch(() => base64Data)
       try {
-        await invoke('update_member', { id: member.id, name: member.name, phone: member.phone, card_code: member.card_code, photo: base64Data, plan_id: member.plan_id, start_date: member.start_date, end_date: member.end_date })
+        await invoke('update_member', { id: member.id, name: member.name, phone: member.phone, card_code: member.card_code, photo, plan_id: member.plan_id, start_date: member.start_date, end_date: member.end_date })
         toast({ title: isArabic ? 'تم تحديث الصورة' : 'Photo Updated', description: isArabic ? 'تم حفظ صورة العميل بنجاح.' : 'Client photo has been saved successfully.', variant: 'success' })
         onRefresh()
       } catch (err) {
@@ -126,7 +195,6 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
     await invoke('use_member_feature', { member_id: member.id, feature: key })
     toast({ title: isArabic ? 'تم الاستخدام' : 'Used', variant: 'success' })
     onRefresh()
-    await bumpNotifications()
   }
 
   useEffect(() => {
@@ -145,8 +213,7 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
 
   if (!member) return null
 
-  const latestRenewal = renewals[0]
-  const paidAmount = latestRenewal?.amount ?? member.plan_price
+  const paidAmount = renewals.reduce((sum, r) => sum + r.amount, 0)
   const remainingAmount = Math.max(member.plan_price - paidAmount, 0)
   const notStarted = member.start_date > getLocalDateString()
   const daysLeft = notStarted ? getDaysLeft(member.start_date) : getDaysLeft(member.end_date)
@@ -185,55 +252,57 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_240px] gap-4">
           <div className="rounded-lg border border-border bg-card p-4">
             <div className="flex items-center justify-between gap-3 mb-4">
-              <div className="flex items-center gap-4">
-                <div onClick={() => showActions && fileInputRef.current?.click()} className={`relative group w-24 h-24 rounded-full bg-primary/20 border-2 border-primary/30 flex items-center justify-center cursor-pointer overflow-hidden transition-all duration-200 hover:border-primary shadow-md ${!showActions ? 'pointer-events-none' : ''}`}
-                  title={showActions ? (isArabic ? 'تغيير الصورة' : 'Change Photo') : ''}
-                >
-                  {member.photo ? (
-                    <img src={member.photo} className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-110" alt={member.name} />
-                  ) : (
-                    <span className="text-3xl text-primary font-bold group-hover:scale-90 transition-transform duration-200">{member.name.charAt(0)}</span>
+              <div>
+                <p className="text-2xl font-bold text-foreground">{member.name}</p>
+                <div className="flex items-center gap-2 text-sm text-muted-foreground mt-1.5">
+                  <Phone className="w-3.5 h-3.5" />{formatPhone(member.phone)}
+                  {member.phone && (
+                    <button onClick={() => void openWhatsApp(member.phone)} title="WhatsApp" className="hover:opacity-70 transition-opacity">
+                      <img src="https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg" alt="WhatsApp" className="w-4 h-4" />
+                    </button>
                   )}
-                  {showActions && (
-                    <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity duration-200">
-                      <Camera className="w-6 h-6 text-white" />
-                    </div>
-                  )}
-                </div>
-                <div>
-                  <p className="text-2xl font-bold text-foreground">{member.name}</p>
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground mt-1.5">
-                    <Phone className="w-3.5 h-3.5" />{formatPhone(member.phone)}
-                    {member.phone && (
-                      <button onClick={() => void openWhatsApp(member.phone)} title="WhatsApp" className="hover:opacity-70 transition-opacity">
-                        <img src="https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg" alt="WhatsApp" className="w-4 h-4" />
-                      </button>
-                    )}
-                    <QrCode className="w-3.5 h-3.5 ml-2" />{member.card_code || t('members.noCard')}
-                  </div>
+                  <QrCode className="w-3.5 h-3.5 ml-2" />{member.card_code || t('members.noCard')}
                 </div>
               </div>
               <Badge className={notStarted ? 'text-blue-400 bg-blue-500/10 border-blue-500/30' : getStatusColor(member.status)}>{notStarted ? (isArabic ? 'لم يبدأ' : 'Not Started') : getStatusLabel(member.status)}</Badge>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5">
-              {detailRows.map((item) => (
+              {detailRows.map((item) => {
+                const isRemaining = item.label === (isArabic ? 'الباقي' : 'Remaining')
+                return (
                 <div key={item.label} className="flex items-center gap-3 rounded-md border border-border bg-muted/50 px-3 py-2.5 min-h-[62px]">
                   <item.icon className={`w-4 h-4 shrink-0 ${item.tone || 'text-primary'}`} />
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <p className="text-[11px] text-muted-foreground">{item.label}</p>
                     <p className={`text-sm font-semibold truncate ${item.tone || 'text-foreground'}`}>{item.value || emptyValue}</p>
                   </div>
+                  {isRemaining && remainingAmount > 0 && showActions && (
+                    <button
+                      onClick={() => { setPayAmount(remainingAmount); setPayDialogOpen(true) }}
+                      className="shrink-0 bg-yellow-500 hover:bg-yellow-600 text-black rounded-md px-2.5 py-1 text-xs font-bold transition-colors"
+                    >
+                      {isArabic ? 'تسديد' : 'Pay'}
+                    </button>
+                  )}
                 </div>
-              ))}
+                )
+              })}
             </div>
           </div>
 
           <div className="rounded-lg border border-border bg-muted/50 p-4 flex flex-col items-center justify-between gap-4">
-            <div className="w-32 h-32 rounded-lg bg-primary/10 border border-primary/25 overflow-hidden flex items-center justify-center">
+            <div onClick={() => showActions && fileInputRef.current?.click()} className={`relative group w-32 h-32 rounded-lg bg-primary/10 border border-primary/25 overflow-hidden flex items-center justify-center cursor-pointer hover:border-primary transition-colors ${!showActions ? 'pointer-events-none' : ''}`}
+              title={showActions ? (isArabic ? 'تغيير الصورة' : 'Change Photo') : ''}
+            >
               {member.photo ? (
-                <img src={member.photo} className="w-full h-full object-cover" alt={member.name} />
+                <img src={member.photo} className="w-full h-full object-cover group-hover:scale-110 transition-transform" alt={member.name} />
               ) : (
-                <User className="w-14 h-14 text-primary" />
+                <User className="w-14 h-14 text-primary group-hover:scale-90 transition-transform" />
+              )}
+              {showActions && (
+                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                  <Camera className="w-6 h-6 text-white" />
+                </div>
               )}
             </div>
             {cardImageSrc && (
@@ -264,42 +333,31 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
                   <f.icon className={`w-5 h-5 mx-auto mb-1 ${f.key === 'freeze' ? 'text-destructive' : 'text-primary'}`} />
                   <p className="text-xs text-muted-foreground">{f.label}</p>
                   <p className="text-lg font-bold text-foreground">{formatNumber(f.used)}/{formatNumber(f.total)}</p>
-                  {maxed ? (
-                    <div className="mt-1 w-5 h-5 mx-auto" />
-                  ) : (
-                    <button
-                      onClick={() => {
-                        if (f.key === 'freeze') {
-                          setFreezeDialogOpen(true)
-                        } else if (f.key === 'invitation') {
-                          setInviteForm({ guest_name: '', guest_phone: '' })
-                          setInviteDialogOpen(true)
-                        } else {
-                          setConfirmDialog({
-                            open: true,
-                            title: t('members.useFeature', { feature: f.label }),
-                            message: t('members.useFeatureMessage', { feature: f.label.toLowerCase(), name: member?.name || '' }),
-                            onConfirm: () => useFeature(f.key)
-                          })
-                        }
-                      }}
-                      className={`mt-1 w-5 h-5 rounded-full flex items-center justify-center mx-auto transition-colors ${f.key === 'freeze' ? 'bg-destructive/20 hover:bg-destructive/40' : 'bg-primary/20 hover:bg-primary/40'}`}
-                      title={t('members.useFeature', { feature: f.label })}
-                    >
-                      <span className={`text-xs ${f.key === 'freeze' ? 'text-destructive' : 'text-primary'}`}>+</span>
-                    </button>
-                  )}
-                </div>
-              )
-            })}
-          </div>
+                    {!maxed && <button onClick={() => { if (f.key === 'freeze') setFreezeDialogOpen(true); else if (f.key === 'invitation') { setInviteForm({ guest_name: '', guest_phone: '' }); setInviteDialogOpen(true) } else setConfirmDialog({ open: true, title: t('members.useFeature', { feature: f.label }), message: t('members.useFeatureMessage', { feature: f.label.toLowerCase(), name: member?.name || '' }), onConfirm: () => useFeature(f.key) }) }} className={`mt-1 w-5 h-5 rounded-full flex items-center justify-center mx-auto transition-colors ${f.key === 'freeze' ? 'bg-destructive/20 hover:bg-destructive/40' : 'bg-primary/20 hover:bg-primary/40'}`} title={t('members.useFeature', { feature: f.label })}><span className={`text-xs ${f.key === 'freeze' ? 'text-destructive' : 'text-primary'}`}>+</span></button>}
+                  </div>
+                )
+              })}
+            </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-5 gap-6 mt-6">
           <div className="md:col-span-3 space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div className="p-3 rounded-lg bg-primary/10 border border-primary/20">
-                <p className="text-xs text-muted-foreground">{t('members.plan')}</p>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground">{t('members.plan')}</p>
+                  {showActions && upgradePlans.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => { setUpgradeForm({ plan_id: '' }); setUpgradeMode('diff'); setUpgradeDialogOpen(true) }}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:text-primary/80 transition-colors"
+                      title={t('members.upgradeTitle')}
+                    >
+                      <ArrowUpCircle className="w-3.5 h-3.5" />
+                      {t('members.upgrade')}
+                    </button>
+                  )}
+                </div>
                 <p className="font-bold text-foreground text-base">{getPlanName(member)}</p>
                 <p className="text-xs text-muted-foreground mt-1">{formatDate(member.start_date)} → {formatDate(member.end_date)}</p>
               </div>
@@ -348,12 +406,20 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
             <Button variant="outline" size="sm" className="gap-2" onClick={() => { setEditForm({ name: member.name, phone: member.phone, card_code: member.card_code }); setEditDialogOpen(true) }}>
               {t('common.edit')}
             </Button>
+            <Button variant="outline" size="sm" className="gap-2 text-cyan-400 border-cyan-500/30" onClick={() => { setDateForm({ start_date: member.start_date }); setDateDialogOpen(true) }}>
+              <CalendarDays className="w-3 h-3" /> {t('members.editStartDate')}
+            </Button>
             <Button variant="outline" size="sm" className="gap-2 text-blue-400 border-blue-500/30" onClick={() => fileInputRef.current?.click()}>
               <Camera className="w-3 h-3" /> {member.photo ? (isArabic ? 'تغيير الصورة' : 'Change Photo') : (isArabic ? 'إضافة صورة' : 'Add Photo')}
             </Button>
             <Button variant="outline" size="sm" className="gap-2 text-primary border-primary/30" onClick={() => { setRenewForm({ plan_id: member.plan_id }); setRenewDialogOpen(true) }}>
               <RotateCcw className="w-3 h-3" /> {t('common.renew')}
             </Button>
+            {upgradePlans.length > 0 && (
+              <Button variant="outline" size="sm" className="gap-2 text-purple-400 border-purple-500/30" onClick={() => { setUpgradeForm({ plan_id: '' }); setUpgradeMode('diff'); setUpgradeDialogOpen(true) }}>
+                <ArrowUpCircle className="w-3 h-3" /> {t('members.upgrade')}
+              </Button>
+            )}
             <Button variant="outline" size="sm" className="gap-2 text-green-500 border-green-500/30" onClick={() => { setInviteForm({ guest_name: '', guest_phone: '' }); setInviteDialogOpen(true) }}>
               <UserPlus className="w-3 h-3" /> {isArabic ? 'دعوة ضيف' : 'Invite Guest'}
             </Button>
@@ -487,6 +553,96 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
         </DialogContent>
       </Dialog>
 
+      <Dialog open={upgradeDialogOpen} onOpenChange={(o) => { setUpgradeDialogOpen(o); if (!o) { setUpgradeForm({ plan_id: '' }); setUpgradeMode('diff') } }}>
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ArrowUpCircle className="w-5 h-5 text-primary" />
+              {t('members.upgradeTitle')}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="p-2.5 rounded-lg bg-muted text-sm">
+              <span className="text-muted-foreground">{t('members.plan')}: </span>
+              <span className="font-semibold">{getPlanName(member)}</span>
+              <span className="text-muted-foreground"> · {formatCurrency(getCurrentPlanPrice(member))}</span>
+            </div>
+            <div className="space-y-2">
+              <Label>{t('members.upgradeNewPlan')}</Label>
+              <Select value={upgradeForm.plan_id} onValueChange={(v) => { setUpgradeForm({ plan_id: v }); setUpgradeMode('diff') }}>
+                <SelectTrigger><SelectValue placeholder={t('members.selectPlan')} /></SelectTrigger>
+                <SelectContent>
+                  {upgradePlans.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>{p.name} - {formatCurrency(p.price)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selectedUpgradePlan && (
+              <>
+                <div className="space-y-2">
+                  <Label>{t('members.upgradeCalcMethod')}</Label>
+                  <div className="grid grid-cols-1 gap-2">
+                    <button type="button" onClick={() => setUpgradeMode('diff')}
+                      className={`p-3 rounded-lg border text-start transition-colors ${upgradeMode === 'diff' ? 'border-primary bg-primary/10' : 'border-border bg-muted/50 hover:border-primary/40'}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold">{t('members.upgradeModeDiff')}</span>
+                        <span className={`text-sm font-bold ${upgradeMode === 'diff' ? 'text-primary' : 'text-foreground'}`}>{formatCurrency(upgradeAmountDiff)}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">{t('members.upgradeNewEnd')}: {formatDate(upgradeNewEndDiff)}</p>
+                    </button>
+                    <button type="button" onClick={() => setUpgradeMode('prorated')}
+                      className={`p-3 rounded-lg border text-start transition-colors ${upgradeMode === 'prorated' ? 'border-primary bg-primary/10' : 'border-border bg-muted/50 hover:border-primary/40'}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold">{t('members.upgradeModeProrated')}</span>
+                        <span className={`text-sm font-bold ${upgradeMode === 'prorated' ? 'text-primary' : 'text-foreground'}`}>{formatCurrency(upgradeAmountProrated)}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">{t('members.upgradeNewEnd')}: {formatDate(upgradeNewEndProrated)}</p>
+                      {upgradeCredit > 0 && <p className="text-xs text-green-500 mt-0.5">{t('members.upgradeCredit')}: {formatCurrency(upgradeCredit)}</p>}
+                    </button>
+                  </div>
+                </div>
+                <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-center">
+                  <p className="text-xs text-muted-foreground">{t('members.upgradeAmount')}</p>
+                  <p className="text-xl font-bold text-green-500">{formatCurrency(upgradeAmount)}</p>
+                </div>
+                <div className="text-xs text-muted-foreground text-center">
+                  {t('members.upgradeNewEnd')}: <span className="font-semibold text-foreground">{formatDate(upgradeNewEnd)}</span>
+                </div>
+              </>
+            )}
+            <Button className="w-full" disabled={!upgradeForm.plan_id || !upgradeNewEnd} onClick={handleUpgrade}>{t('members.confirmUpgrade')}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={dateDialogOpen} onOpenChange={(o) => { setDateDialogOpen(o); if (!o) setDateForm({ start_date: member?.start_date || '' }) }}>
+        <DialogContent className="sm:max-w-[350px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <CalendarDays className="w-5 h-5 text-cyan-400" />
+              {t('members.editStartDate')}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="p-2.5 rounded-lg bg-muted text-sm">
+              <span className="text-muted-foreground">{t('members.currentStartDate')}: </span>
+              <span className="font-semibold">{formatDate(member?.start_date || '')}</span>
+            </div>
+            <div className="space-y-2">
+              <Label>{t('members.newStartDate')}</Label>
+              <Input type="date" value={dateForm.start_date} onChange={(e) => setDateForm({ start_date: e.target.value })} />
+            </div>
+            {dateForm.start_date && (
+              <div className="text-xs text-muted-foreground text-center">
+                {t('members.upgradeNewEnd')}: <span className="font-semibold text-foreground">{formatDate(addMonthsToDate(dateForm.start_date, member?.plan_duration_months || 1))}</span>
+              </div>
+            )}
+            <Button className="w-full" disabled={!dateForm.start_date} onClick={handleEditDate}>{t('members.saveChanges')}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={inviteDialogOpen} onOpenChange={setInviteDialogOpen}>
         <DialogContent className="sm:max-w-[400px]">
           <DialogHeader>
@@ -522,12 +678,36 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
                 })
                 setInviteDialogOpen(false)
                 onRefresh()
-                refreshNotifications()
               } catch (err) {
                 toast({ title: isArabic ? 'فشل' : 'Failed', description: String(err), variant: 'destructive' })
               }
             }}>
               <UserPlus className="w-4 h-4" /> {isArabic ? 'تأكيد' : 'Confirm'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={payDialogOpen} onOpenChange={(o) => { setPayDialogOpen(o); if (!o) setPayAmount(remainingAmount) }}>
+        <DialogContent className="sm:max-w-[350px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Banknote className="w-5 h-5 text-yellow-500" />
+              {isArabic ? 'تسديد الدفعة' : 'Pay Remaining'}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-center">
+              <p className="text-xs text-muted-foreground">{isArabic ? 'المبلغ المتبقي' : 'Remaining Balance'}</p>
+              <p className="text-2xl font-bold text-yellow-500">{formatCurrency(remainingAmount)}</p>
+            </div>
+            <div className="space-y-2">
+              <Label>{isArabic ? 'المبلغ' : 'Amount'}</Label>
+              <Input type="number" step="0.01" min={0} max={remainingAmount} value={payAmount || ''}
+                onChange={(e) => setPayAmount(Math.min(Math.max(parseFloat(e.target.value) || 0, 0), remainingAmount))} />
+            </div>
+            <Button className="w-full bg-yellow-500 hover:bg-yellow-600 text-black font-bold" disabled={!payAmount || payAmount <= 0} onClick={recordPayment}>
+              {isArabic ? 'تأكيد الدفع' : 'Confirm Payment'}
             </Button>
           </div>
         </DialogContent>
@@ -557,3 +737,6 @@ export default function InlineMemberProfile({ member, attendance, renewals, plan
     </div>
   )
 }
+
+
+

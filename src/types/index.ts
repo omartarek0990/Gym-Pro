@@ -5,6 +5,7 @@ export interface Member {
   card_code: string
   photo: string
   plan_id: string
+  gender: string
   start_date: string
   end_date: string
   status: string
@@ -15,7 +16,13 @@ export interface Member {
   frozen_until: string
   freeze_start_date: string
   freeze_days_entered: number
-  plan_name?: string
+  plan_name: string
+  plan_price: number
+  plan_duration_months: number
+  plan_inbody_count: number
+  plan_invitation_count: number
+  plan_freeze_days: number
+  plan_private_sessions: number
   days_left?: number
 }
 
@@ -44,6 +51,7 @@ export interface Renewal {
   member_id: string
   date: string
   amount: number
+  rtype: string
   member_name?: string
 }
 
@@ -67,15 +75,6 @@ export interface SupplementOrder {
   date: string
   time: string
   supplement_name?: string
-}
-
-export interface NotificationLog {
-  id: string
-  title: string
-  message: string
-  priority: string
-  date: string
-  time: string
 }
 
 export interface AuditLog {
@@ -148,3 +147,6 @@ export interface ProfitData {
   year_supplement: number
   year: number
 }
+
+
+

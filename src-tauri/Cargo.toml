@@ -21,7 +21,14 @@ serde = { version = "1", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
-tauri-plugin-log = "2"
+tauri-plugin-shell = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

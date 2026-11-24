@@ -4,20 +4,16 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-500 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
-        default: "bg-yellow-600 text-black hover:bg-yellow-500 shadow-lg shadow-yellow-600/20 hover:shadow-yellow-600/30",
-
+        default: "bg-primary text-primary-foreground hover:bg-primary/90 shadow-lg shadow-primary/20",
         destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90 shadow-lg shadow-destructive/20",
-
-        outline: "border border-[#2a2a0a] bg-transparent hover:bg-yellow-600/10 hover:border-yellow-500/30 text-white",
-
+        outline: "border border-border bg-transparent hover:bg-accent/10 hover:border-accent/30 text-foreground",
         secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-
-        ghost: "hover:bg-yellow-600/10 text-gray-400 hover:text-white",
-        link: "text-yellow-500 underline-offset-4 hover:underline",
+        ghost: "hover:bg-accent/10 text-muted-foreground hover:text-foreground",
+        link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
         default: "h-10 px-4 py-2",

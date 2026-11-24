@@ -10,6 +10,10 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  base: './',
+  build: {
+    target: 'es2018',
+  },
   server: {
     watch: {
       ignored: ['**/src-tauri/target/**'],

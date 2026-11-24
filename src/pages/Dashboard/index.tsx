@@ -1,21 +1,21 @@
-import { useState, useEffect } from 'react'
-import { motion } from 'framer-motion'
-import { Users, UserCheck, UserX, QrCode, TrendingUp, DollarSign, AlertTriangle, ArrowRight } from 'lucide-react'
-import { invoke } from '@/lib/tauri'
+import { useState, useEffect, useMemo } from 'react'
+import { Users, UserCheck, UserX, UserRoundX, QrCode, TrendingUp, DollarSign, ArrowRight } from 'lucide-react'
+import { invoke, listen } from '@/lib/tauri'
 import StatCard from '@/components/shared/StatCard'
 import PageTransition from '@/components/shared/PageTransition'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { formatCurrency, formatDate, getDaysLeft, getDaysColor } from '@/lib/utils'
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { formatCurrency, formatDate, formatNumber, getDaysLeft, getDaysColor } from '@/lib/utils'
 import { useNavigate } from 'react-router-dom'
 import { DashboardStats, Member } from '@/types'
 import { useLanguage } from '@/lib/i18n'
+import { useAuth } from '@/contexts/AuthContext'
 
 export default function Dashboard() {
   const navigate = useNavigate()
   const { isArabic } = useLanguage()
+  const { isOwner } = useAuth()
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [members, setMembers] = useState<Member[]>([])
   const [loading, setLoading] = useState(true)
@@ -24,7 +24,7 @@ export default function Dashboard() {
     try {
       const result = await invoke('get_dashboard_stats')
       if (result) setStats(JSON.parse(result as string))
-      const m = await invoke('get_members')
+      const m = await invoke('get_members_light')
       if (m) setMembers(m as Member[])
     } catch (e) {
       console.error(e)
@@ -32,16 +32,20 @@ export default function Dashboard() {
     setLoading(false)
   }
 
-  useEffect(() => { loadData() }, [])
+  useEffect(() => {
+    loadData()
+    let unlisten: (() => void) | undefined
+    listen('attendance-updated', loadData).then((fn) => { unlisten = fn })
+    return () => { unlisten?.() }
+  }, [])
 
-  const activeMembers = members.filter((m) => m.status === 'active')
-  const expiredMembers = members.filter((m) => m.status === 'expired')
-  const expiringSoon = members.filter((m) => {
+  const activeMembers = useMemo(() => members.filter((m) => m.status === 'active'), [members])
+  const noactiveMembers = useMemo(() => members.filter((m) => m.status === 'noactive'), [members])
+  const expiredMembers = useMemo(() => members.filter((m) => m.status === 'expired'), [members])
+  const expiringSoon = useMemo(() => members.filter((m) => {
     const d = getDaysLeft(m.end_date)
     return m.status === 'active' && d >= 0 && d <= 7
-  })
-
-  const chartData = stats?.chart_data?.map((c: string) => JSON.parse(c)) || []
+  }), [members])
 
   const quickActions = [
     { label: isArabic ? 'إضافة عضو' : 'Add Member', icon: Users, path: '/members', color: 'yellow' },
@@ -55,7 +59,7 @@ export default function Dashboard() {
       <PageTransition>
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
           {[1,2,3,4].map((i) => (
-            <div key={i} className="h-[120px] rounded-xl skeleton" />
+            <div key={i} className="h-[120px] rounded-xl bg-muted" />
           ))}
         </div>
       </PageTransition>
@@ -65,80 +69,57 @@ export default function Dashboard() {
   return (
     <PageTransition>
       <div className="space-y-6">
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-5">
           <StatCard title={isArabic ? 'إجمالي الأعضاء' : 'Total Members'} value={members.length} icon={Users} color="yellow" subtitle={isArabic ? `${activeMembers.length} نشط` : `${activeMembers.length} active`} index={0} />
           <StatCard title={isArabic ? 'نشط' : 'Active'} value={activeMembers.length} icon={UserCheck} color="green" subtitle={isArabic ? `${expiringSoon.length} ينتهي قريبًا` : `${expiringSoon.length} expiring soon`} index={1} />
-          <StatCard title={isArabic ? 'منتهي' : 'Expired'} value={expiredMembers.length} icon={UserX} color="red" subtitle={isArabic ? 'يحتاج تجديد' : 'Need renewal'} index={2} />
-          <StatCard title={isArabic ? 'حضور اليوم' : 'Today Attendance'} value={stats?.today_attendance || 0} icon={QrCode} color="yellow" index={3} />
+          <StatCard title={isArabic ? 'غير نشيط' : 'No Active'} value={noactiveMembers.length} icon={UserRoundX} color="yellow" subtitle={isArabic ? 'لم يحضروا ٧ أيام' : 'No show 7 days'} index={2} />
+          <StatCard title={isArabic ? 'منتهي' : 'Expired'} value={expiredMembers.length} icon={UserX} color="red" subtitle={isArabic ? 'يحتاج تجديد' : 'Need renewal'} index={3} />
+          <StatCard title={isArabic ? 'حضور اليوم' : 'Today Attendance'} value={stats?.today_attendance || 0} icon={QrCode} color="yellow" index={4} />
         </div>
 
+        {isOwner() && (
+        <>
         <div className="grid gap-6 lg:grid-cols-3">
-          <Card className="lg:col-span-2 border-[#1a2d45] bg-[#0d1117]/80">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-lg text-white">{isArabic ? 'نظرة عامة على الإيرادات' : 'Revenue Overview'}</CardTitle>
-              <Badge variant="secondary">{isArabic ? 'شهري' : 'Monthly'}</Badge>
-            </CardHeader>
-            <CardContent>
-              <div className="h-[300px]">
-                <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-                  <AreaChart data={chartData}>
-                    <defs>
-                      <linearGradient id="revGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#EAB308" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#EAB308" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1a2d45" />
-                    <XAxis dataKey="month" stroke="#94a3b8" fontSize={12} />
-                    <YAxis stroke="#94a3b8" fontSize={12} />
-                    <Tooltip contentStyle={{ background: '#0d1117', border: '1px solid #1a2d45', borderRadius: '8px', color: '#fff' }} />
-                    <Area type="monotone" dataKey="revenue" stroke="#EAB308" strokeWidth={2} fill="url(#revGrad)" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="border-[#1a2d45] bg-[#0d1117]/80">
+          <Card className="lg:col-span-3">
             <CardHeader>
-              <CardTitle className="text-lg text-white">{isArabic ? 'إجراءات سريعة' : 'Quick Actions'}</CardTitle>
+              <CardTitle className="text-lg">{isArabic ? 'إجراءات سريعة' : 'Quick Actions'}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
               {quickActions.map((action, i) => (
-                <motion.div key={action.label} initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.1 * i }}>
-                  <Button variant="ghost" className="w-full justify-between text-gray-300 hover:text-white hover:bg-yellow-600/10" onClick={() => navigate(action.path)}>
+                <div key={action.label}>
+                  <Button variant="ghost" className="w-full justify-between" onClick={() => navigate(action.path)}>
                     <span className="flex items-center gap-2"><action.icon className="w-4 h-4" />{action.label}</span>
-                    <ArrowRight className="w-4 h-4 text-gray-500" />
+                    <ArrowRight className="w-4 h-4 text-muted-foreground" />
                   </Button>
-                </motion.div>
+                </div>
               ))}
             </CardContent>
           </Card>
         </div>
 
         <div className="grid gap-6 lg:grid-cols-2">
-          <Card className="border-[#1a2d45] bg-[#0d1117]/80">
+          <Card>
             <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle className="text-lg text-white">{isArabic ? 'ينتهي قريبًا' : 'Expiring Soon'}</CardTitle>
+              <CardTitle className="text-lg">{isArabic ? 'ينتهي قريبًا' : 'Expiring Soon'}</CardTitle>
               <Badge variant="warning">{isArabic ? `${expiringSoon.length} تنبيه` : `${expiringSoon.length} alerts`}</Badge>
             </CardHeader>
             <CardContent>
               {expiringSoon.length === 0 ? (
-                <p className="text-gray-500 text-center py-8">{isArabic ? 'لا يوجد أعضاء تنتهي خلال 7 أيام' : 'No members expiring in 7 days'}</p>
+                <p className="text-muted-foreground text-center py-8">{isArabic ? 'لا يوجد أعضاء تنتهي خلال 7 أيام' : 'No members expiring in 7 days'}</p>
               ) : (
                 <div className="space-y-2">
                   {expiringSoon.slice(0, 5).map((m) => {
                     const days = getDaysLeft(m.end_date)
                     return (
-                      <motion.div key={m.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                        className="flex items-center justify-between p-3 rounded-lg bg-red-500/5 border border-red-500/10"
+                      <div key={m.id}
+                        className="flex items-center justify-between p-3 rounded-lg bg-destructive/5 border border-destructive/10"
                       >
                         <div>
-                          <p className="text-sm text-white font-medium">{m.name}</p>
-                          <p className="text-xs text-gray-400">{formatDate(m.end_date)}</p>
+                          <p className="text-sm font-medium text-foreground">{m.name}</p>
+                          <p className="text-xs text-muted-foreground">{formatDate(m.end_date)}</p>
                         </div>
-                        <Badge variant={days <= 3 ? 'destructive' : 'warning'}>{isArabic ? `${days} يوم متبقي` : `${days}d left`}</Badge>
-                      </motion.div>
+                        <Badge variant={days <= 3 ? 'destructive' : 'warning'}>{isArabic ? `${formatNumber(days)} يوم متبقي` : `${formatNumber(days)}d left`}</Badge>
+                      </div>
                     )
                   })}
                 </div>
@@ -146,29 +127,31 @@ export default function Dashboard() {
             </CardContent>
           </Card>
 
-          <Card className="border-[#1a2d45] bg-[#0d1117]/80">
+          <Card>
             <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle className="text-lg text-white">{isArabic ? 'ملخص الإيرادات' : 'Revenue Summary'}</CardTitle>
+              <CardTitle className="text-lg">{isArabic ? 'ملخص الإيرادات' : 'Revenue Summary'}</CardTitle>
               <Badge variant="secondary">{isArabic ? 'هذا الشهر' : 'This Month'}</Badge>
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
-                <div className="flex items-center justify-between p-3 rounded-lg bg-white/5">
-                  <span className="text-gray-400">{isArabic ? 'إيرادات الخطط' : 'Plan Revenue'}</span>
-                  <span className="text-lg font-bold text-yellow-400">{formatCurrency(stats?.month_revenue || 0)}</span>
+                <div className="flex items-center justify-between p-3 rounded-lg bg-muted">
+                  <span className="text-muted-foreground">{isArabic ? 'إيرادات الخطط' : 'Plan Revenue'}</span>
+                  <span className="text-lg font-bold text-primary">{formatCurrency(stats?.month_revenue || 0)}</span>
                 </div>
-                <div className="flex items-center justify-between p-3 rounded-lg bg-white/5">
-                  <span className="text-gray-400">{isArabic ? 'ربح المكملات' : 'Supplement Profit'}</span>
-                  <span className="text-lg font-bold text-yellow-400">{formatCurrency(stats?.supplement_profit || 0)}</span>
+                <div className="flex items-center justify-between p-3 rounded-lg bg-muted">
+                  <span className="text-muted-foreground">{isArabic ? 'ربح المكملات' : 'Supplement Profit'}</span>
+                  <span className="text-lg font-bold text-primary">{formatCurrency(stats?.supplement_profit || 0)}</span>
                 </div>
-                <div className="flex items-center justify-between p-3 rounded-lg bg-yellow-600/10 border border-yellow-500/20">
-                  <span className="text-white font-medium">{isArabic ? 'إجمالي الإيرادات' : 'Total Revenue'}</span>
-                  <span className="text-xl font-bold text-white">{formatCurrency(stats?.total_revenue || 0)}</span>
+                <div className="flex items-center justify-between p-3 rounded-lg bg-primary/10 border border-primary/20">
+                  <span className="font-medium text-foreground">{isArabic ? 'إجمالي الإيرادات' : 'Total Revenue'}</span>
+                  <span className="text-xl font-bold text-foreground">{formatCurrency(stats?.total_revenue || 0)}</span>
                 </div>
               </div>
             </CardContent>
           </Card>
         </div>
+        </>
+        )}
       </div>
     </PageTransition>
   )

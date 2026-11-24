@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { motion } from 'framer-motion'
 import { User, CheckCircle, Snowflake, RefreshCw } from 'lucide-react'
-import { emit, invoke, listen } from '@/lib/tauri'
+import { invoke, listen } from '@/lib/tauri'
 import PageTransition from '@/components/shared/PageTransition'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -12,7 +11,6 @@ import { formatTime, generateId, getLocalDateString, addMonthsToDate, formatPhon
 import { toast } from '@/hooks/useToast'
 import { Member, Plan, Attendance as AttendanceType, Renewal } from '@/types'
 import { useLanguage } from '@/lib/i18n'
-import { refreshNotifications } from '@/hooks/useNotificationRefresh'
 import MemberProfileDialog from '@/components/shared/MemberProfileDialog'
 
 export default function AttendancePage() {
@@ -30,8 +28,13 @@ export default function AttendancePage() {
   const [profileRenewals, setProfileRenewals] = useState<Renewal[]>([])
   const [refreshing, setRefreshing] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const scanInProgressRef = useRef(false)
+  const scanTimerRef = useRef<number | undefined>(undefined)
+  const lastInputAtRef = useRef(0)
+  const scannerBurstRef = useRef(false)
   const unlistenRef = useRef<(() => void) | undefined>(undefined)
   const [profileCardImage, setProfileCardImage] = useState<string>('')
+  const [visibleCount, setVisibleCount] = useState(25)
 
   const compactScanCode = (value: string) => value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
   const scanDigits = (value: string) => value.replace(/\D/g, '')
@@ -49,14 +52,22 @@ export default function AttendancePage() {
     })
   }
 
+  const loadAttendance = async () => {
+    setRefreshing(true)
+    try {
+      const a = await invoke('get_attendance_by_date', { date: getLocalDateString() })
+      if (a) setAttendance(a as AttendanceType[])
+    } catch {}
+    setRefreshing(false)
+  }
+
   const load = async () => {
     setRefreshing(true)
-    try { await invoke('check_inactive_members') } catch {}
     try {
       const [m, p, a] = await Promise.all([
-        invoke('get_members'),
+        invoke('get_members_light'),
         invoke('get_plans'),
-        invoke('get_all_attendance'),
+        invoke('get_attendance_by_date', { date: getLocalDateString() }),
       ])
       if (m) setMembers(m as Member[])
       if (p) setPlans(p as Plan[])
@@ -65,30 +76,54 @@ export default function AttendancePage() {
     setRefreshing(false)
   }
 
+  const focusScannerInput = () => {
+    window.setTimeout(() => {
+      // Do not steal keyboard input from an open modal dialog.
+      if (!document.querySelector('[role="dialog"]')) {
+        inputRef.current?.focus()
+        inputRef.current?.select()
+      }
+    }, 0)
+  }
+
   useEffect(() => {
     load()
-    listen('attendance-updated', () => { load() }).then((fn) => { unlistenRef.current = fn })
+    listen('attendance-updated', () => { loadAttendance() }).then((fn) => { unlistenRef.current = fn })
     return () => { unlistenRef.current?.() }
   }, [])
-  useEffect(() => { inputRef.current?.focus() }, [])
+
+  useEffect(() => {
+    const restoreFocus = () => focusScannerInput()
+    restoreFocus()
+    window.addEventListener('focus', restoreFocus)
+    document.addEventListener('visibilitychange', restoreFocus)
+    return () => {
+      window.removeEventListener('focus', restoreFocus)
+      document.removeEventListener('visibilitychange', restoreFocus)
+    }
+  }, [])
 
   useEffect(() => {
     if (!showConfirm && !frozenDialogOpen) {
-      setTimeout(() => inputRef.current?.focus(), 100)
+      focusScannerInput()
     }
   }, [showConfirm, frozenDialogOpen])
+
+  useEffect(() => () => {
+    if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current)
+  }, [])
 
   const loadProfile = async (memberId: string) => {
     const [att, ren, m, img] = await Promise.all([
       invoke('get_attendance', { member_id: memberId }),
       invoke('get_renewals', { member_id: memberId }),
-      invoke('get_members'),
+      invoke('get_member_by_id', { member_id: memberId }),
       invoke('get_member_card_image', { member_id: memberId }),
     ])
     if (att) setProfileAttendance(att as AttendanceType[])
     if (ren) setProfileRenewals(ren as Renewal[])
     if (m) {
-      const updated = (m as Member[]).find((x) => x.id === memberId)
+      const updated = m as Member | null
       if (updated) setProfileMember(updated)
     }
     if (img) setProfileCardImage(img as string)
@@ -101,55 +136,105 @@ export default function AttendancePage() {
 
   const handleScan = async (raw: string) => {
     const code = raw.trim()
-    if (!code) return
+    if (!code || scanInProgressRef.current) return
+    scanInProgressRef.current = true
+    if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current)
+    // Clear the actual DOM element as well as React state before the async lookup.
+    // This makes the next scanner payload start cleanly even on a slow WebView render.
+    if (inputRef.current) inputRef.current.value = ''
     setScanValue('')
     setMethod('Barcode')
 
-    // Try direct DB lookup by card_code (avoids fetching all members with photos)
-    let member: Member | undefined
     try {
-      const result = await invoke('find_member_by_card', { card_code: code }) as Member | null
-      if (result) member = result
-    } catch {}
+      // Try direct DB lookup by card_code (avoids fetching all members with photos)
+      let member: Member | undefined
+      try {
+        const result = await invoke('find_member_by_card', { card_code: code }) as Member | null
+        if (result) member = result
+      } catch {}
 
-    // Fallback: search by phone from local state
-    if (!member) {
-      member = findScannedMember(code, members)
+      // Fallback: search by phone from local state
+      if (!member) {
+        member = findScannedMember(code, members)
+      }
+
+      if (!member) {
+        toast({ title: isArabic ? 'العضو غير موجود' : 'Member Not Found', description: isArabic ? `لا يوجد عضو بهذا الكود: ${code}` : `No member with code: ${code}`, variant: 'destructive' })
+        return
+      }
+
+      const today = getLocalDateString()
+
+      // A membership is valid through its end date. Never let an expired
+      // membership reach the attendance command.
+      if (member.status === 'expired' || (member.end_date && member.end_date < today)) {
+        toast({
+          title: isArabic ? 'الاشتراك منتهي' : 'Membership Expired',
+          description: isArabic ? `${member.name} يحتاج إلى تجديد الاشتراك قبل تسجيل الحضور.` : `${member.name} must renew the membership before checking in.`,
+          variant: 'destructive',
+        })
+        return
+      }
+
+      // Auto-start membership if member has future start date
+      if (member.start_date && member.start_date > today) {
+        const newEnd = addMonthsToDate(today, member.plan_duration_months || 1)
+        await invoke('update_member_dates', { member_id: member.id, new_start: today, new_end: newEnd })
+        member.start_date = today
+        member.end_date = newEnd
+        toast({ title: isArabic ? 'تم بدء العضوية' : 'Membership Started', description: `${member.name} بدأت من اليوم`, variant: 'success' })
+      }
+
+      if (member.status === 'frozen') {
+        setScanResult(member)
+        setFrozenDialogOpen(true)
+        return
+      }
+
+      const exists = await invoke('check_attendance_today', { member_id: member.id, date: today })
+      if (!exists) {
+        const now = new Date()
+        const time = now.toTimeString().split(' ')[0]
+        await invoke('add_attendance', { id: generateId(), member_id: member.id, date: today, time, method: 'Barcode' })
+        toast({ title: isArabic ? 'تم تسجيل الحضور' : 'Attendance Recorded', description: `${member.name} - ${formatTime(time)}`, variant: 'success' })
+      }
+
+      loadAttendance()
+      await showProfile(member)
+    } finally {
+      scanInProgressRef.current = false
+      focusScannerInput()
     }
+  }
 
-    if (!member) {
-      toast({ title: isArabic ? 'العضو غير موجود' : 'Member Not Found', description: isArabic ? `لا يوجد عضو بهذا الكود: ${code}` : `No member with code: ${code}`, variant: 'destructive' })
-      return
+  const submitCurrentScan = () => {
+    // Scanner input can arrive faster than a React state render; use the DOM value.
+    void handleScan(inputRef.current?.value || scanValue)
+  }
+
+  const handleScanInput = (value: string) => {
+    const now = performance.now()
+    const interval = now - lastInputAtRef.current
+    lastInputAtRef.current = now
+    // Hardware sends a character burst roughly every 5–20ms and, as verified,
+    // does not send a trailing Enter. Manual typing stays manual until Enter/click.
+    if (interval > 0 && interval < 80) scannerBurstRef.current = true
+    if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current)
+    setScanValue(value)
+    if (scannerBurstRef.current && value.trim().length >= 4) {
+      scanTimerRef.current = window.setTimeout(() => {
+        scannerBurstRef.current = false
+        void handleScan(inputRef.current?.value || value)
+      }, 180)
     }
+  }
 
-    const today = getLocalDateString()
-
-    // Auto-start membership if member has future start date
-    if (member.start_date && member.start_date > today) {
-      const newEnd = addMonthsToDate(today, member.plan_duration_months || 1)
-      await invoke('update_member_dates', { member_id: member.id, new_start: today, new_end: newEnd })
-      member.start_date = today
-      member.end_date = newEnd
-      toast({ title: isArabic ? 'تم بدء العضوية' : 'Membership Started', description: `${member.name} بدأت من اليوم`, variant: 'success' })
-    }
-
-    if (member.status === 'frozen') {
-      setScanResult(member)
-      setFrozenDialogOpen(true)
-      return
-    }
-
-    const exists = await invoke('check_attendance_today', { member_id: member.id, date: today })
-    if (!exists) {
-      const now = new Date()
-      const time = now.toTimeString().split(' ')[0]
-      await invoke('add_attendance', { id: generateId(), member_id: member.id, date: today, time, method: 'Barcode' })
-      await emit('attendance-updated', { member_id: member.id })
-      toast({ title: isArabic ? 'تم تسجيل الحضور' : 'Attendance Recorded', description: `${member.name} - ${formatTime(time)}`, variant: 'success' })
-    }
-
-    load()
-    await showProfile(member)
+  const handleScanKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Enter' && event.code !== 'Enter' && event.code !== 'NumpadEnter') return
+    event.preventDefault()
+    if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current)
+    scannerBurstRef.current = false
+    submitCurrentScan()
   }
 
   const recordFrozenAttendance = async (member: Member) => {
@@ -157,8 +242,6 @@ export default function AttendancePage() {
     const date = getLocalDateString(now)
     const time = now.toTimeString().split(' ')[0]
     await invoke('add_attendance', { id: generateId(), member_id: member.id, date, time, method, was_frozen: true })
-    refreshNotifications()
-    await emit('attendance-updated', { member_id: member.id })
     toast({ title: isArabic ? 'تم تسجيل الحضور' : 'Attendance Recorded', description: `${member.name} - ${formatTime(time)}`, variant: 'success' })
     setFrozenDialogOpen(false)
     setScanResult(null)
@@ -174,6 +257,9 @@ export default function AttendancePage() {
   const memberMap = useMemo(() => new Map(members.map(m => [m.id, m])), [members])
   const todayStr = useMemo(() => getLocalDateString(), [])
   const todayAttendance = useMemo(() => attendance.filter((a) => a.date === todayStr), [attendance, todayStr])
+  const visibleAttendance = useMemo(() => todayAttendance.slice(0, visibleCount), [todayAttendance, visibleCount])
+
+  useEffect(() => { setVisibleCount(25) }, [todayAttendance.length])
 
   return (
     <PageTransition>
@@ -223,7 +309,7 @@ export default function AttendancePage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {todayAttendance.map((a, i) => {
+                    {visibleAttendance.map((a) => {
                       const m = memberMap.get(a.member_id)
                       const isInvite = a.method.startsWith('Invite|')
                       const inviteParts = isInvite ? a.method.split('|') : []
@@ -231,7 +317,7 @@ export default function AttendancePage() {
                       const inviterName = inviteParts[2] || m?.name || '—'
 
                       return (
-                        <motion.tr key={a.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.02 }}
+                        <tr key={a.id}
                           onDoubleClick={() => m && showProfile(m)}
                           className="border-b border-border/50 hover:bg-muted cursor-pointer transition-colors"
                         >
@@ -257,11 +343,18 @@ export default function AttendancePage() {
                               {isInvite ? 'Invite' : a.method}
                             </Badge>
                           </td>
-                        </motion.tr>
+                        </tr>
                       )
                     })}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {visibleAttendance.length < todayAttendance.length && (
+              <div className="pt-4 text-center">
+                <Button variant="outline" onClick={() => setVisibleCount((count) => count + 25)}>
+                  {isArabic ? 'عرض المزيد' : 'Load More'}
+                </Button>
               </div>
             )}
           </CardContent>
@@ -270,31 +363,27 @@ export default function AttendancePage() {
         {/* Scan bar */}
         <Card>
           <CardContent className="p-3">
-            <div className="flex items-center gap-2 max-w-xl mx-auto">
+            <form className="flex items-center gap-2 max-w-xl mx-auto" onSubmit={(event) => { event.preventDefault(); submitCurrentScan() }}>
               <Input
                 ref={inputRef}
                 placeholder={t('attendance.scanPlaceholder')}
                 value={scanValue}
-                onChange={(e) => setScanValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    handleScan(e.currentTarget.value)
-                  }
-                }}
+                onChange={(e) => handleScanInput(e.target.value)}
+                onKeyDown={handleScanKeyDown}
                 className="text-center font-mono h-10"
                 autoFocus
               />
-              <Button onClick={() => handleScan(inputRef.current?.value?.trim() || '')} className="h-10 shrink-0">{t('attendance.scan')}</Button>
-              <Button variant="ghost" size="icon" onClick={handleManualAttendance} className="h-10 w-10 shrink-0" title={t('attendance.manual')}>
+              <Button type="submit" onClick={submitCurrentScan} className="h-10 shrink-0">{t('attendance.scan')}</Button>
+              <Button type="button" variant="ghost" size="icon" onClick={handleManualAttendance} className="h-10 w-10 shrink-0" title={t('attendance.manual')}>
                 <User className="w-4 h-4" />
               </Button>
-            </div>
+            </form>
           </CardContent>
         </Card>
 
         {/* Inline profile below scan bar */}
         {profileMember && (
-          <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}>
+          <div>
             <MemberProfileDialog
               variant="inline"
               open={false}
@@ -307,7 +396,7 @@ export default function AttendancePage() {
               onRefresh={() => { if (profileMember) loadProfile(profileMember.id) }}
               cardImage={profileCardImage}
             />
-          </motion.div>
+          </div>
         )}
 
         {/* Manual attendance member selector */}
@@ -326,10 +415,9 @@ export default function AttendancePage() {
                       const now = new Date()
                       const time = now.toTimeString().split(' ')[0]
                       await invoke('add_attendance', { id: generateId(), member_id: m.id, date: today, time, method: 'Manual' })
-                      await emit('attendance-updated', { member_id: m.id })
                       toast({ title: isArabic ? 'تم تسجيل الحضور' : 'Attendance Recorded', description: `${m.name} - ${formatTime(time)}`, variant: 'success' })
                     }
-                    load()
+                    loadAttendance()
                     await showProfile(m)
                   }}
                   className="w-full text-left p-3 rounded-lg hover:bg-primary/10 transition-colors"

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { motion } from 'framer-motion'
-import { Settings as SettingsIcon, Database, Sun, Moon, Globe, Shield, RotateCcw, Upload, HardDrive, Clock, FolderOpen, RefreshCw, Save, AlertTriangle, Loader2, IdCard, Trash2 } from 'lucide-react'
+import { Sun, Moon, Shield, HardDrive, Clock, FolderOpen, RefreshCw, Save, IdCard, Trash2, User, UserCog } from 'lucide-react'
+
 import { invoke } from '@/lib/tauri'
 import PageTransition from '@/components/shared/PageTransition'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -9,10 +9,6 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
-  DialogFooter, DialogClose
-} from '@/components/ui/dialog'
 import { toast } from '@/hooks/useToast'
 import { AppSetting, BackupInfo } from '@/types'
 import { Language, useLanguage } from '@/lib/i18n'
@@ -23,8 +19,16 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [backupInfo, setBackupInfo] = useState<BackupInfo | null>(null)
   const [backingUp, setBackingUp] = useState(false)
-  const [restoreDialog, setRestoreDialog] = useState<{ open: boolean; which: string }>({ open: false, which: '' })
-  
+  const [countdown, setCountdown] = useState('')
+  const [ownerUsername, setOwnerUsername] = useState('')
+  const [ownerNewPass, setOwnerNewPass] = useState('')
+  const [ownerConfirmPass, setOwnerConfirmPass] = useState('')
+  const [adminUsername, setAdminUsername] = useState('')
+  const [adminPassword, setAdminPassword] = useState('')
+  const [hasAdmin, setHasAdmin] = useState(false)
+  const [savingOwner, setSavingOwner] = useState(false)
+  const [savingAdmin, setSavingAdmin] = useState(false)
+
   const load = async () => {
     try {
       const [s, bi] = await Promise.all([
@@ -37,15 +41,75 @@ export default function SettingsPage() {
         setSettings(map)
       }
       if (bi) setBackupInfo(JSON.parse(bi as string) as BackupInfo)
+      try {
+        const users = await invoke('get_users') as { id: string; username: string; role: string }[]
+        const owner = users.find(u => u.role === 'owner')
+        const admin = users.find(u => u.role === 'admin')
+        if (owner) setOwnerUsername(owner.username)
+        if (admin) {
+          setAdminUsername(admin.username)
+          setHasAdmin(true)
+        }
+      } catch {}
     } catch {}
     setLoading(false)
   }
+
   useEffect(() => { load() }, [])
 
   const update = async (key: string, value: string) => {
     await invoke('update_setting', { key, value })
     setSettings((prev) => ({ ...prev, [key]: value }))
     toast({ title: t('toast.settingUpdated'), variant: 'success' })
+  }
+
+  const handleSaveOwner = async () => {
+    if (!ownerUsername.trim()) {
+      toast({ title: isArabic ? 'اسم المستخدم مطلوب' : 'Username required', variant: 'destructive' })
+      return
+    }
+    if (ownerNewPass.length < 4) {
+      toast({ title: isArabic ? 'كلمة السر قصيرة جداً' : 'Password too short', variant: 'destructive' })
+      return
+    }
+    if (ownerNewPass !== ownerConfirmPass) {
+      toast({ title: isArabic ? 'كلمتا السر غير متطابقتين' : 'Passwords do not match', variant: 'destructive' })
+      return
+    }
+    setSavingOwner(true)
+    try {
+      await invoke('update_owner_credentials', { username: ownerUsername.trim(), password: ownerNewPass })
+      toast({ title: isArabic ? 'تم حفظ حساب المالك' : 'Owner account saved', variant: 'success' })
+      setOwnerNewPass('')
+      setOwnerConfirmPass('')
+    } catch (e) {
+      toast({ title: isArabic ? 'فشل الحفظ' : 'Save failed', description: String(e), variant: 'destructive' })
+    }
+    setSavingOwner(false)
+  }
+
+  const handleSaveAdmin = async () => {
+    if (!adminUsername.trim() || !adminPassword.trim()) {
+      toast({ title: isArabic ? 'أكمل البيانات' : 'Fill all fields', variant: 'destructive' })
+      return
+    }
+    if (adminPassword.length < 4) {
+      toast({ title: isArabic ? 'كلمة السر قصيرة جداً' : 'Password too short', variant: 'destructive' })
+      return
+    }
+    setSavingAdmin(true)
+    try {
+      await invoke('update_admin_credentials', { username: adminUsername.trim(), password: adminPassword })
+      toast({
+        title: hasAdmin ? (isArabic ? 'تم تحديث حساب الأدمن' : 'Admin account updated') : (isArabic ? 'تم إنشاء حساب الأدمن' : 'Admin account created'),
+        variant: 'success',
+      })
+      setHasAdmin(true)
+      setAdminPassword('')
+    } catch (e) {
+      toast({ title: isArabic ? 'فشل الحفظ' : 'Save failed', description: String(e), variant: 'destructive' })
+    }
+    setSavingAdmin(false)
   }
 
   const handleBackup = async () => {
@@ -61,24 +125,65 @@ export default function SettingsPage() {
     setBackingUp(false)
   }
 
-  const handleRestore = async (which: string) => {
-    setRestoreDialog({ open: true, which })
-  }
-
-  const confirmRestore = async () => {
-    setRestoreDialog({ open: false, which: '' })
+  const handleRestore = async (_which: string) => {
     try {
-      await invoke('restore_backup', { which: restoreDialog.which })
-      toast({ title: t('toast.restored'), description: isArabic ? 'تم استرجاع النسخة. سيتم إعادة تحميل الصفحة.' : `${restoreDialog.which} backup restored. Page will reload.`, variant: 'success' })
-      setTimeout(() => window.location.reload(), 1500)
+      await invoke('restore_backup', { which: '' })
+      toast({
+        title: t('toast.restored'),
+        description: isArabic
+          ? 'تم استرجاع النسخة. سيتم إعادة تحميل الصفحة.'
+          : 'Backup restored. Page will reload.',
+        variant: 'success',
+      })
+      // Hard reload to force all React state and queries to re-fetch from the new DB
+      setTimeout(() => {
+        window.location.href = window.location.href
+      }, 1500)
     } catch (e) {
-      toast({ title: t('toast.restoreFailed'), description: String(e), variant: 'destructive' })
+      if (String(e) !== 'cancelled') {
+        toast({ title: t('toast.restoreFailed'), description: String(e), variant: 'destructive' })
+      }
     }
   }
 
-  const applyTheme = (_theme: string) => {}
+  const applyTheme = (theme: string) => {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark')
+    } else {
+      document.documentElement.classList.remove('dark')
+    }
+  }
 
-  useEffect(() => { applyTheme(settings.theme) }, [settings.theme])
+  useEffect(() => { applyTheme(settings.theme || 'dark') }, [settings.theme])
+
+  useEffect(() => {
+    const tick = () => {
+      if (!backupInfo?.last_backup) {
+        setCountdown('Not yet')
+        return
+      }
+      const last = new Date(backupInfo.last_backup)
+      const next = new Date(last.getTime() + 3600000)
+      const diff = next.getTime() - Date.now()
+      if (diff <= 0) {
+        setCountdown(isArabic ? 'الآن' : 'Now')
+        return
+      }
+      const totalSecs = Math.floor(diff / 1000)
+      const mins = Math.floor(totalSecs / 60)
+      const secs = totalSecs % 60
+      const hrs = Math.floor(mins / 60)
+      const remMins = mins % 60
+      if (hrs > 0) {
+        setCountdown(isArabic ? `${hrs}س ${remMins}د ${secs}ث` : `${hrs}h ${remMins}m ${secs}s`)
+      } else {
+        setCountdown(isArabic ? `${mins}د ${secs}ث` : `${mins}m ${secs}s`)
+      }
+    }
+    tick()
+    const interval = setInterval(tick, 1000)
+    return () => clearInterval(interval)
+  }, [backupInfo?.last_backup, isArabic])
 
   const calcNextBackup = () => {
     if (!backupInfo?.last_backup) return t('time.notYet')
@@ -97,25 +202,14 @@ export default function SettingsPage() {
     return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   }
 
-  if (loading) return <PageTransition><div className="space-y-4">{[1,2,3].map((i) => <div key={i} className="h-24 rounded-xl skeleton" />)}</div></PageTransition>
+  if (loading) return <PageTransition><div className="space-y-4">{[1,2,3].map((i) => <div key={i} className="h-24 rounded-xl bg-muted" />)}</div></PageTransition>
 
   return (
     <PageTransition>
       <div className="space-y-6 max-w-2xl">
-        {/* Gym Info */}
-        <Card className="border-[#1a2d45]">
-          <CardHeader><CardTitle className="text-white flex items-center gap-2"><SettingsIcon className="w-4 h-4" />{t('settings.gymInfo')}</CardTitle></CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label>{t('settings.gymName')}</Label>
-              <Input value={settings.gym_name || ''} onChange={(e) => update('gym_name', e.target.value)} />
-            </div>
-          </CardContent>
-        </Card>
-
         {/* Theme & Language */}
-        <Card className="border-[#1a2d45]">
-          <CardHeader><CardTitle className="text-white flex items-center gap-2">
+        <Card>
+          <CardHeader><CardTitle className="flex items-center gap-2">
             {settings.theme === 'dark' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
             {t('settings.appearance')}
           </CardTitle></CardHeader>
@@ -138,24 +232,24 @@ export default function SettingsPage() {
         </Card>
 
         {/* Backup & Restore */}
-        <Card className="border-[#1a2d45]">
-          <CardHeader><CardTitle className="text-white flex items-center gap-2"><HardDrive className="w-4 h-4 text-yellow-400" />{t('settings.backupRestore')}</CardTitle></CardHeader>
+        <Card>
+          <CardHeader><CardTitle className="flex items-center gap-2"><HardDrive className="w-4 h-4 text-primary" />{t('settings.backupRestore')}</CardTitle></CardHeader>
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
-              <div className="p-3 rounded-lg bg-yellow-600/10 border border-yellow-500/20">
-                <p className="text-xs text-gray-400 flex items-center gap-1"><Clock className="w-3 h-3" /> {t('settings.lastBackup')}</p>
-                <p className="text-sm font-bold text-white mt-1">{formatTime(backupInfo?.last_backup || '')}</p>
+              <div className="p-3 rounded-lg bg-primary/10 border border-primary/20">
+                <p className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" /> {t('settings.lastBackup')}</p>
+                <p className="text-sm font-bold text-foreground mt-1">{formatTime(backupInfo?.last_backup || '')}</p>
               </div>
-              <div className="p-3 rounded-lg bg-yellow-600/10 border border-yellow-500/20">
-                <p className="text-xs text-gray-400 flex items-center gap-1"><RefreshCw className="w-3 h-3" /> {t('settings.nextBackup')}</p>
-                <p className="text-sm font-bold text-yellow-400 mt-1">{calcNextBackup()}</p>
+              <div className="p-3 rounded-lg bg-primary/10 border border-primary/20">
+                <p className="text-xs text-muted-foreground flex items-center gap-1"><RefreshCw className="w-3 h-3" /> {t('settings.nextBackup')}</p>
+                <p className="text-sm font-bold text-primary mt-1 font-mono">{countdown || '—'}</p>
               </div>
             </div>
             <div className="space-y-2">
               <Label>{t('settings.backupFolder')}</Label>
               <div className="flex gap-2">
                 <Input value={settings.backup_folder || ''} onChange={(e) => update('backup_folder', e.target.value)} placeholder="D:/GymBackup" />
-                <Button variant="outline" size="icon" onClick={async () => {
+                <Button variant="outline" className="gap-2" onClick={async () => {
                   try {
                     const p = await invoke('pick_backup_folder') as string
                     if (p) {
@@ -176,41 +270,33 @@ export default function SettingsPage() {
             <Button className="w-full gap-2" onClick={handleBackup} disabled={backingUp}>
               <Save className="w-4 h-4" />{backingUp ? t('settings.backingUp') : t('settings.backupNow')}
             </Button>
-            <div className="border border-[#1a2d45] rounded-lg divide-y divide-[#1a2d45]">
+            <div className="border border-border rounded-lg">
               <div className="p-3 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-white font-medium">{t('settings.currentBackup')}</p>
-                  <p className="text-xs text-gray-500">gym_backup_current.db</p>
-                  <p className="text-xs text-gray-400">{formatTime(backupInfo?.current_time || '')}</p>
+                  <p className="text-sm font-medium text-foreground">{isArabic ? 'النسخة الاحتياطية' : 'Backup File'}</p>
+                  <p className="text-xs text-muted-foreground font-mono">gym_backup.db</p>
+                  <p className="text-xs text-muted-foreground">{formatTime(backupInfo?.current_time || '')}</p>
                 </div>
-                <Button variant="outline" size="sm" className="text-yellow-400 border-yellow-500/30" onClick={() => handleRestore('current')}>{t('common.restore')}</Button>
-              </div>
-              <div className="p-3 flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-white font-medium">{t('settings.previousBackup')}</p>
-                  <p className="text-xs text-gray-500">gym_backup_previous.db</p>
-                  <p className="text-xs text-gray-400">{formatTime(backupInfo?.previous_time || '')}</p>
-                </div>
-                <Button variant="outline" size="sm" className="text-yellow-400 border-yellow-500/30" onClick={() => handleRestore('previous')}>{t('common.restore')}</Button>
+                <Button variant="outline" size="sm" className="text-primary border-primary/30" onClick={() => handleRestore('current')}>{t('common.restore')}</Button>
               </div>
             </div>
           </CardContent>
         </Card>
 
         {/* Card Settings */}
-        <Card className="border-[#1a2d45]">
-          <CardHeader><CardTitle className="text-white flex items-center gap-2"><IdCard className="w-4 h-4 text-yellow-400" />{isArabic ? 'إعدادات الكارت' : 'Card Settings'}</CardTitle></CardHeader>
+        <Card>
+          <CardHeader><CardTitle className="flex items-center gap-2"><IdCard className="w-4 h-4 text-primary" />{isArabic ? 'إعدادات الكارت' : 'Card Settings'}</CardTitle></CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label>{isArabic ? 'مجلد حفظ كروت الأعضاء' : 'Member Card Save Folder'}</Label>
+              <Label>{isArabic ? 'مجلد حفظ كروت الجيم' : 'GYM Cards Folder'}</Label>
               <div className="flex gap-2">
-                <Input value={settings.card_save_folder || ''} onChange={(e) => update('card_save_folder', e.target.value)} placeholder={isArabic ? 'اختر مجلد الحفظ...' : 'Choose save folder...'} />
+                <Input value={settings.gym_card_save_folder || settings.card_save_folder || ''} onChange={(e) => update('gym_card_save_folder', e.target.value)} placeholder={isArabic ? 'اختر مجلد كروت الجيم...' : 'Choose GYM cards folder...'} />
                 <Button variant="outline" size="icon" onClick={async () => {
                   try {
                     const p = await invoke('pick_card_save_folder') as string
                     if (p) {
-                      await invoke('update_setting', { key: 'card_save_folder', value: p })
-                      setSettings((prev) => ({ ...prev, card_save_folder: p }))
+                      await invoke('update_setting', { key: 'gym_card_save_folder', value: p })
+                      setSettings((prev) => ({ ...prev, gym_card_save_folder: p }))
                       toast({ title: isArabic ? 'تم تعيين المجلد' : 'Folder Set', description: p, variant: 'success' })
                     }
                   } catch (e) {
@@ -219,69 +305,78 @@ export default function SettingsPage() {
                     }
                   }
                 }}>
-                  <FolderOpen className="w-4 h-4" />
+                  <FolderOpen className="w-4 h-4" />{isArabic ? 'تغيير المجلد' : 'Change Folder'}
                 </Button>
-                {settings.card_save_folder && (
-                  <Button variant="outline" size="icon" onClick={() => update('card_save_folder', '')}>
-                    <Trash2 className="w-4 h-4 text-red-400" />
+                {(settings.gym_card_save_folder || settings.card_save_folder) && (
+                  <Button variant="outline" className="gap-2" onClick={() => update('gym_card_save_folder', '')}>
+                    <Trash2 className="w-4 h-4 text-destructive" />{isArabic ? 'مسح' : 'Clear'}
                   </Button>
                 )}
               </div>
-              <p className="text-xs text-gray-500">{isArabic ? 'إذا تم تعيين مجلد، سيتم حفظ كروت الأعضاء تلقائياً بدون طلب تحديد المجلد كل مرة.' : 'If set, member cards will be saved automatically without asking each time.'}</p>
+              <p className="text-xs text-muted-foreground">{isArabic ? 'إذا تم تعيين مجلد، سيتم حفظ كروت الجيم تلقائياً بدون طلب تحديد المجلد كل مرة.' : 'If set, GYM cards will save automatically without asking each time.'}</p>
             </div>
           </CardContent>
         </Card>
 
-        {/* Security */}
-        <Card className="border-[#1a2d45]">
-          <CardHeader><CardTitle className="text-white flex items-center gap-2"><Shield className="w-4 h-4" />{t('settings.security')}</CardTitle></CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label>{t('settings.deletePassword')}</Label>
-              <Input
-                type="password"
-                value={settings.delete_password || ''}
-                onChange={(e) => update('delete_password', e.target.value)}
-                placeholder={t('settings.deletePasswordPlaceholder')}
-              />
-              <p className="text-xs text-gray-500">{t('settings.deletePasswordHelp')}</p>
-            </div>
-          </CardContent>
-        </Card>
-
-        <p className="text-center text-xs text-gray-600">{t('settings.footer')}</p>
-      </div>
-
-      {/* Restore Confirmation Dialog */}
-      <Dialog open={restoreDialog.open} onOpenChange={(open) => setRestoreDialog({ ...restoreDialog, open })}>
-        <DialogContent className="border-red-900/30 max-w-sm">
-          <DialogHeader>
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-full bg-red-500/10">
-                <AlertTriangle className="w-5 h-5 text-red-500" />
+        {/* Security — Owner & Admin Accounts */}
+        <Card>
+          <CardHeader><CardTitle className="flex items-center gap-2"><Shield className="w-4 h-4" />{t('settings.security')}</CardTitle></CardHeader>
+          <CardContent className="space-y-6">
+            {/* Owner Account */}
+            <div className="space-y-3 p-4 rounded-xl border border-border/50 bg-muted/30">
+              <div className="flex items-center gap-2">
+                <User className="w-4 h-4 text-primary" />
+                <h3 className="text-sm font-semibold text-foreground">{isArabic ? 'حساب المالك' : 'Owner Account'}</h3>
               </div>
-              <DialogTitle className="text-white">{t('settings.restoreBackup')}</DialogTitle>
+              <div className="space-y-2">
+                <Label>{isArabic ? 'اسم المستخدم' : 'Username'}</Label>
+                <Input value={ownerUsername} onChange={(e) => setOwnerUsername(e.target.value)} placeholder={isArabic ? 'اسم المستخدم' : 'Username'} />
+              </div>
+              <div className="space-y-2">
+                <Label>{isArabic ? 'كلمة السر الجديدة' : 'New Password'}</Label>
+                <Input type="password" value={ownerNewPass} onChange={(e) => setOwnerNewPass(e.target.value)} placeholder="••••••••" />
+              </div>
+              <div className="space-y-2">
+                <Label>{isArabic ? 'تأكيد كلمة السر' : 'Confirm Password'}</Label>
+                <Input type="password" value={ownerConfirmPass} onChange={(e) => setOwnerConfirmPass(e.target.value)} placeholder="••••••••" />
+              </div>
+              <Button className="gap-2" onClick={handleSaveOwner} disabled={savingOwner}>
+                {savingOwner ? <span className="inline-block w-4 h-4 rounded-full bg-primary/40" /> : <Save className="w-4 h-4" />}
+                {isArabic ? 'حفظ' : 'Save'}
+              </Button>
             </div>
-            <DialogDescription className="text-gray-400 pt-2">
-              {t('settings.restoreQuestion')}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="px-6 py-3 mx-[-1.5rem] bg-red-500/5 border-y border-red-500/10">
-            <p className="text-sm text-red-400 flex items-start gap-2">
-              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-              <span>{t('settings.restoreWarning')}</span>
-            </p>
-          </div>
-          <DialogFooter className="gap-2">
-            <DialogClose asChild>
-              <Button variant="outline" className="border-gray-700 text-gray-300">{t('common.cancel')}</Button>
-            </DialogClose>
-            <Button onClick={confirmRestore} className="bg-blue-600 hover:bg-blue-700 text-white gap-2">
-              <RotateCcw className="w-4 h-4" /> {t('common.restore')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+
+            {/* Admin Account */}
+            <div className="space-y-3 p-4 rounded-xl border border-border/50 bg-muted/30">
+              <div className="flex items-center gap-2">
+                <UserCog className="w-4 h-4 text-primary" />
+                <h3 className="text-sm font-semibold text-foreground">{isArabic ? 'حساب الأدمن' : 'Admin Account'}</h3>
+              </div>
+              <div className="space-y-2">
+                <Label>{isArabic ? 'اسم المستخدم' : 'Username'}</Label>
+                <Input value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} placeholder={isArabic ? 'اسم المستخدم' : 'Username'} />
+              </div>
+              <div className="space-y-2">
+                <Label>{isArabic ? 'كلمة السر' : 'Password'}</Label>
+                <Input type="password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} placeholder="••••••••" />
+              </div>
+              <Button className="gap-2" onClick={handleSaveAdmin} disabled={savingAdmin}>
+                {savingAdmin ? <span className="inline-block w-4 h-4 rounded-full bg-primary/40" /> : <Save className="w-4 h-4" />}
+                {hasAdmin
+                  ? (isArabic ? 'حفظ' : 'Save')
+                  : (isArabic ? 'إنشاء حساب Admin' : 'Create Admin Account')}
+              </Button>
+              <div className="p-3 rounded-lg bg-primary/5 border border-primary/10 text-xs text-muted-foreground space-y-1">
+                <p className="font-medium text-foreground">{isArabic ? 'صلاحيات الأدمن:' : 'Admin permissions:'}</p>
+                <p>{isArabic ? '✓ Dashboard, Members, Attendance, Invitations, Supplements (POS فقط), Plans, Alerts' : '✓ Dashboard, Members, Attendance, Invitations, Supplements (POS only), Plans, Alerts'}</p>
+                <p>{isArabic ? '✗ Profits, Reports, Audit Log, Settings, Card Manager, حذف الأعضاء' : '✗ Profits, Reports, Audit Log, Settings, Card Manager, delete members'}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <p className="text-center text-xs text-muted-foreground">{t('settings.footer')}</p>
+      </div>
     </PageTransition>
   )
 }
